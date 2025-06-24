@@ -247,6 +247,9 @@ pub struct Connection {
     multi_ui_session: bool,
     tx_from_authed: mpsc::UnboundedSender<ipc::Data>,
     printer_data: Vec<(Instant, String, Vec<u8>)>,
+    // For post requests that need to be sent sequentially.
+    // eg. post_conn_audit
+    tx_post_seq: mpsc::UnboundedSender<(String, Value)>,
 }
 
 impl ConnInner {
@@ -320,6 +323,11 @@ impl Connection {
         #[cfg(target_os = "linux")]
         let linux_headless_handle =
             LinuxHeadlessHandle::new(_rx_cm_stream_ready, _tx_desktop_ready);
+
+        let (tx_post_seq, rx_post_seq) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            Self::post_seq_loop(rx_post_seq).await;
+        });
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let tx_cloned = tx.clone();
@@ -401,6 +409,7 @@ impl Connection {
             retina: Retina::default(),
             tx_from_authed,
             printer_data: Vec::new(),
+            tx_post_seq,
         };
         let addr = hbb_common::try_into_v4(addr);
         if !conn.on_open(addr).await {
@@ -960,7 +969,14 @@ impl Connection {
         }
         #[cfg(target_os = "linux")]
         clear_remapped_keycode();
-        log::info!("Input thread exited");
+        log::debug!("Input thread exited");
+    }
+
+    async fn post_seq_loop(mut rx: mpsc::UnboundedReceiver<(String, Value)>) {
+        while let Some((url, v)) = rx.recv().await {
+            allow_err!(Self::post_audit_async(url, v).await);
+        }
+        log::debug!("post_seq_loop exited");
     }
 
     async fn try_port_forward_loop(
@@ -1117,9 +1133,7 @@ impl Connection {
         v["uuid"] = json!(crate::encode64(hbb_common::get_uuid()));
         v["conn_id"] = json!(self.inner.id);
         v["session_id"] = json!(self.lr.session_id);
-        tokio::spawn(async move {
-            allow_err!(Self::post_audit_async(url, v).await);
-        });
+        allow_err!(self.tx_post_seq.send((url, v)));
     }
 
     fn get_files_for_audit(job_type: fs::JobType, mut files: Vec<FileEntry>) -> Vec<(String, i64)> {
@@ -1379,7 +1393,7 @@ impl Connection {
         }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         if self.file_transfer.is_some() {
-            if crate::platform::is_prelogin() || self.tx_to_cm.send(ipc::Data::Test).is_err() {
+            if crate::platform::is_prelogin() { // }|| self.tx_to_cm.send(ipc::Data::Test).is_err() {
                 username = "".to_owned();
             }
         }
@@ -1843,7 +1857,7 @@ impl Connection {
                 )
                 .await
                 {
-                    log::error!("ipc to connection manager exit: {}", err);
+                    log::warn!("ipc to connection manager exit: {}", err);
                     // https://github.com/rustdesk/rustdesk-server-pro/discussions/382#discussioncomment-10525725, cm may start failed
                     #[cfg(windows)]
                     if !crate::platform::is_prelogin()
@@ -3093,10 +3107,18 @@ impl Connection {
                     if virtual_display_manager::amyuni_idd::is_my_display(&name) {
                         record_changed = false;
                     }
+                    #[cfg(not(target_os = "macos"))]
+                    let scale = 1.0;
+                    #[cfg(target_os = "macos")]
+                    let scale = display.scale();
+                    let original = (
+                        ((display.width() as f64) / scale).round() as _,
+                        (display.height() as f64 / scale).round() as _,
+                    );
                     if record_changed {
                         display_service::set_last_changed_resolution(
                             &name,
-                            (display.width() as _, display.height() as _),
+                            original,
                             (r.width, r.height),
                         );
                     }
@@ -4424,7 +4446,7 @@ mod raii {
                     *WALLPAPER_REMOVER.lock().unwrap() = None;
                 }
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                display_service::reset_resolutions();
+                display_service::restore_resolutions();
                 #[cfg(windows)]
                 let _ = virtual_display_manager::reset_all();
                 #[cfg(target_os = "linux")]

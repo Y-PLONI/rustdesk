@@ -540,6 +540,20 @@ class _GeneralState extends State<_General> {
             'Capture screen using DirectX',
             kOptionDirectxCapture,
           ),
+        if (!bind.isIncomingOnly()) ...[
+          _OptionCheckBox(
+            context,
+            'Enable UDP hole punching',
+            kOptionEnableUdpPunch,
+            isServer: false,
+          ),
+          _OptionCheckBox(
+            context,
+            'Enable IPv6 P2P connection',
+            kOptionEnableIpv6Punch,
+            isServer: false,
+          ),
+        ],
       ],
     ];
     if (!isWeb && bind.mainShowOption(key: kOptionAllowLinuxHeadless)) {
@@ -1097,6 +1111,34 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                   ))
               .toList();
 
+          final isOptFixedNumOTP =
+              isOptionFixed(kOptionAllowNumericOneTimePassword);
+          final isNumOPTChangable = !isOptFixedNumOTP && tmpEnabled && !locked;
+          final numericOneTimePassword = GestureDetector(
+            child: InkWell(
+                child: Row(
+              children: [
+                Checkbox(
+                        value: model.allowNumericOneTimePassword,
+                        onChanged: isNumOPTChangable
+                            ? (bool? v) {
+                                model.switchAllowNumericOneTimePassword();
+                              }
+                            : null)
+                    .marginOnly(right: 5),
+                Expanded(
+                    child: Text(
+                  translate('Numeric one-time password'),
+                  style: TextStyle(
+                      color: disabledTextColor(context, isNumOPTChangable)),
+                ))
+              ],
+            )),
+            onTap: isNumOPTChangable
+                ? () => model.switchAllowNumericOneTimePassword()
+                : null,
+          ).marginOnly(left: _kContentHSubMargin - 5);
+
           final modeKeys = <String>[
             'password',
             'click',
@@ -1133,6 +1175,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                     ],
                   ),
                   enabled: tmpEnabled && !locked),
+            numericOneTimePassword,
             if (usePassword) radios[1],
             if (usePassword)
               _SubButton('Set permanent password', setPasswordDialog,
